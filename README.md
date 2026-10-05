@@ -65,10 +65,17 @@ python app.py          # 默认监听 8000 端口，可用 PORT 环境变量修�
    会在提交前复核 —— 系统在同一写事务中试用变更，并按每条在投投放关联
    凭据的发布日期与媒介重校验整段；任一版本出现不可发布区间即拦截并回滚
    整笔变更，页面列出受影响投放、链接与阻断明细。已撤下的投放不阻拦。
+10. **凭据换发（渠道内容迁至新链接）**：渠道内容迁移后，在「渠道投放台账」
+    卡片内选择旧凭据与同一访谈 / 发布日期 / 媒介的新凭据，载入旧凭据的
+    全部在投记录，逐行填写新投放链接后提交 —— 同一写事务中旧投放标记
+    已撤下、按原渠道与新链接登记新投放并保存逐条前后关联；清单缺漏 / 重复、
+    凭据失效或在投集合变化时整批失败。新投放继续参与授权变更保护；
+    投放列表 / 详情与「换发历史」可随时查阅关联。
 
 访谈、说话人、发言与授权记录均可在页面上直接修改、保存或删除；
 发行凭据封存后不可修改、不可删除，原访谈删除后仍可查阅；
-投放记录只增不删，撤下仅更新状态与撤下时间，凭据不改动。
+投放记录只增不删，撤下仅更新状态与撤下时间，凭据不改动；
+凭据换发的撤旧 / 登新与逐条前后关联在同一写事务中完成，批次与关联同样只增不删。
 
 ## 补件并复核（批量补授权）
 
@@ -226,7 +233,100 @@ curl -s -X POST http://localhost:8000/api/placements/1/withdraw \
 - `credential.sealed_result`：凭据封存的发行时结论（不可修改，始终保留）；
 - `risk` / `risk_label` / `changes`：凭据当前风险与发生变化的资料类别；
 - `current.summary` / `current.blocked`：按封存的发布日期与媒介对现有资料
-  重新校验的汇总与当前阻断区间；来源缺失时 `current` 为 null。
+  重新校验的汇总与当前阻断区间；来源缺失时 `current` 为 null；
+- `reissue`：凭据换发前后关联（详见下节），未换发时两侧均为 null。
+
+## 凭据换发（渠道内容迁至新链接）
+
+渠道内容迁移到新链接后，可为**同一访谈**的在投投放整批换发凭据。
+`POST /api/placements/reissue` 在同一 SQLite 写事务（`BEGIN IMMEDIATE`）中：
+
+1. 校验旧 / 新凭据：二者都必须存在、**必须不同**，且对应**同一访谈、
+   同一发布日期、同一媒介**；新凭据还须**与当前资料一致、整段可发布**
+   （口径同登记投放：来源缺失 / 资料有变化 / 存在阻断区间均拒绝）；
+2. 校验换发清单：旧凭据必须有「投放中」记录，提交的 `items` 必须
+   **恰好覆盖其全部在投记录**，每条只出现一次（缺漏、重复或夹带已撤下 /
+   他凭据的投放均失败）；
+3. 全部通过才提交：把旧投放逐条标记「已撤下」（撤下原因注明
+   「凭据换发：内容已迁至 <新链接>」并保留撤下时间），按**原渠道**与
+   新链接登记新投放（投放中，挂新凭据），并逐条保存旧投放 → 新投放的
+   前后关联与批次编号；
+4. 任一条件不满足即**整批回滚**（HTTP 409 / 400）：旧记录不变，
+   也不产生新投放、不留关联。
+
+换发后的新投放是普通「投放中」记录，**继续参与授权变更提交前复核**；
+旧投放、旧 / 新凭据与逐条关联均只增不删（数据库触发器保证）。
+
+请求体：
+
+```json
+{
+  "old_credential_id": 1,
+  "new_credential_id": 2,
+  "items": [
+    {"placement_id": 1, "url": "https://example.com/v2/topic"},
+    {"placement_id": 2, "url": "https://podcast.example/episode-v2"}
+  ]
+}
+```
+
+- `items[].placement_id`：旧凭据的在投投放 ID；`items[].url`：该条内容
+  迁移后的新投放链接；渠道沿用旧投放登记的渠道，无需提交。
+- 成功返回 HTTP 201：`batch_id` 批次编号、`count` 条数，`items[]` 逐条给出
+  `old_placement_id` / `new_placement_id` / `channel` / `old_url` / `new_url`
+  与撤下时间。
+- 失败：HTTP 400 —— 清单形状非法（非列表、字段缺失、`placement_id` 重复等）；
+  HTTP 404 —— 旧或新凭据不存在；HTTP 409 —— `reason` 为 `mismatch`
+  （新旧凭据相同 / 不同访谈 / 不同发布日期 / 不同媒介）、`new_missing` /
+  `new_changed` / `new_blocked`（新凭据失效）、`no_active`（旧凭据无在投
+  记录）或 `placements_mismatch`（清单未恰好覆盖在投集合，返回
+  `missing_placement_ids` 与 `extra_placement_ids`）。
+
+```bash
+# 前提：凭据 #1 下有投放 #1、#2（投放中）；凭据 #2 为同一访谈 / 发布日期 /
+# 媒介重新封存的新凭据（资料与当前一致、整段可发布）
+curl -s -X POST http://localhost:8000/api/placements/reissue \
+  -H 'Content-Type: application/json' \
+  -d '{
+        "old_credential_id": 1,
+        "new_credential_id": 2,
+        "items": [
+          {"placement_id": 1, "url": "https://example.com/v2/topic"},
+          {"placement_id": 2, "url": "https://podcast.example/episode-v2"}
+        ]
+      }'
+# HTTP 201：{"reissued": true, "batch_id": 1, "old_credential_id": 1,
+#   "new_credential_id": 2, "count": 2,
+#   "items": [{"old_placement_id": 1, "new_placement_id": 3, "channel": "官网专题页",
+#     "old_url": "https://example.com/features/oral-history-1",
+#     "new_url": "https://example.com/v2/topic", "old_status": "withdrawn",
+#     "new_status": "active", "old_withdrawn_at": "2026-10-05 ..."}, ...]}
+
+# 清单缺漏一条 -> 409，旧投放不变，也不产生新投放
+curl -s -X POST http://localhost:8000/api/placements/reissue \
+  -H 'Content-Type: application/json' \
+  -d '{"old_credential_id": 1, "new_credential_id": 2,
+       "items": [{"placement_id": 1, "url": "https://example.com/v2/topic"}]}'
+# HTTP 409：{"reissued": false, "reason": "placements_mismatch",
+#   "missing_placement_ids": [2], "extra_placement_ids": [], ...}
+
+# 换发历史：批次列表（含逐条旧投放 -> 新投放关联与双方当前状态）
+curl -s http://localhost:8000/api/reissues
+
+# 投放列表 / 详情中的 reissue 字段给出单条投放的前后关联：
+#   作为旧投放被换出 -> reissue.as_old（指向新投放，direction=replaced_by）
+#   作为新投放换入   -> reissue.as_new（指向旧投放，direction=replaced）
+curl -s http://localhost:8000/api/placements/3
+# {"id": 3, ..., "reissue": {"as_old": null, "as_new": {
+#   "batch_id": 1, "other_placement_id": 1, "old_credential_id": 1,
+#   "new_credential_id": 2, "channel": "官网专题页",
+#   "url": "https://example.com/features/oral-history-1",
+#   "status": "withdrawn", "status_label": "已撤下", ...}}}
+```
+
+页面「渠道投放台账」卡片内提供凭据换发工作台：选择旧 / 新凭据并
+「载入旧凭据在投记录」得到逐条清单，逐行填写新投放链接后提交；
+投放列表、详情与「换发历史」均可查阅逐条前后关联。
 
 ## 授权变更提交前复核（在投投放保护）
 
@@ -304,9 +404,11 @@ curl -s -X PUT http://localhost:8000/api/licenses/2 \
 | GET | `/api/credentials` | 凭据列表（含当前状态：与发行时一致 / 待复核 / 来源缺失） |
 | GET | `/api/credentials/<id>` | 凭据详情：发行时结论 + 一致读取快照中的当前复核（变化类别、当前阻断区间） |
 | POST | `/api/credentials/<id>/placements` | 登记投放 `{channel, url}`：同一事务复核来源，全部满足才保存「投放中」记录，否则说明原因不留记录 |
-| GET | `/api/placements` | 投放列表（投放状态 + 凭据当前风险：正常 / 需处理 / 来源缺失） |
-| GET | `/api/placements/<id>` | 投放详情：封存结论 + 一致读取快照中的当前风险（变化类别、当前阻断区间） |
+| GET | `/api/placements` | 投放列表（投放状态 + 凭据当前风险 + 凭据换发前后关联） |
+| GET | `/api/placements/<id>` | 投放详情：封存结论 + 一致读取快照中的当前风险（变化类别、当前阻断区间）+ 换发关联 |
 | POST | `/api/placements/<id>/withdraw` | 撤下投放 `{reason}`：标记已撤下并保留撤下时间，凭据不改动 |
+| POST | `/api/placements/reissue` | 凭据换发 `{old_credential_id, new_credential_id, items:[{placement_id,url}]}`：同一写事务撤旧登新并保存逐条关联；新旧凭据须不同且对应同一访谈 / 发布日期 / 媒介，新凭据须与当前资料一致、整段可发布，清单须恰好覆盖旧凭据全部在投记录（缺漏 / 重复 / 凭据失效 / 集合变化整批失败） |
+| GET | `/api/reissues` | 凭据换发历史：批次列表（含逐条旧投放 → 新投放关联与双方当前状态） |
 
 ## 运行测试
 
@@ -316,10 +418,12 @@ python -m unittest test_remediation.py -v # 补件事务编排（纯 Python + SQ
 python -m unittest test_credentials.py -v # 发行凭据事务编排（纯 Python + SQLite）
 python -m unittest test_placements.py -v  # 渠道投放台账事务编排（纯 Python + SQLite）
 python -m unittest test_license_guard.py -v # 授权变更提交前复核事务编排（纯 Python + SQLite）
+python -m unittest test_reissues.py -v   # 凭据换发事务编排（纯 Python + SQLite）
 python -m unittest test_remediate_api.py -v  # 补件接口 HTTP 层（需 Flask，Docker 镜像内可运行）
 python -m unittest test_credential_api.py -v # 凭据接口 HTTP 层（需 Flask，Docker 镜像内可运行）
 python -m unittest test_placement_api.py -v  # 投放台账接口 HTTP 层（需 Flask，Docker 镜像内可运行）
 python -m unittest test_license_guard_api.py -v # 授权复核接口 HTTP 层（需 Flask，Docker 镜像内可运行）
+python -m unittest test_reissue_api.py -v # 凭据换发接口 HTTP 层（需 Flask，Docker 镜像内可运行）
 node test_frontend.js                     # 前端交互冒烟测试（可选，需 Node）
 ```
 
@@ -332,15 +436,18 @@ remediation.py       补件并复核：同一 SQLite 事务中的试算与一次
 credentials.py       发行凭据：同一事务中校验并封存，查阅时在一致快照中复核现状
 placements.py        渠道投放台账：同一事务复核来源并登记，一致快照查阅，撤下保留时间
 license_guard.py     授权变更提交前复核：同一写事务中试用变更并按在投投放关联版本重校验整段
+reissues.py          凭据换发：同一写事务中撤旧登新并保存逐条前后关联，历史 / 关联一致快照查阅
 test_evaluator.py    核心逻辑单元测试
 test_remediation.py  补件事务编排单元测试（不依赖 Flask）
 test_credentials.py  发行凭据事务编排单元测试（不依赖 Flask）
 test_placements.py   渠道投放台账事务编排单元测试（不依赖 Flask）
 test_license_guard.py 授权变更提交前复核事务编排单元测试（不依赖 Flask）
+test_reissues.py     凭据换发事务编排单元测试（不依赖 Flask）
 test_remediate_api.py 补件接口 HTTP 层测试（需 Flask）
 test_credential_api.py 凭据接口 HTTP 层测试（需 Flask）
 test_placement_api.py 投放台账接口 HTTP 层测试（需 Flask）
 test_license_guard_api.py 授权复核接口 HTTP 层测试（需 Flask）
+test_reissue_api.py 凭据换发接口 HTTP 层测试（需 Flask）
 templates/index.html 单页界面
 static/app.js        前端交互（原生 JavaScript）
 static/style.css     样式

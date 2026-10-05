@@ -96,6 +96,32 @@ CREATE TRIGGER channel_placements_no_reopen
 BEFORE UPDATE ON channel_placements
 WHEN OLD.status = 'withdrawn'
 BEGIN SELECT RAISE(ABORT, '投放记录已撤下，不可再修改'); END;
+CREATE TABLE placement_reissue_batches (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    old_credential_id INTEGER NOT NULL REFERENCES release_credentials(id),
+    new_credential_id INTEGER NOT NULL REFERENCES release_credentials(id),
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE placement_reissues (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    batch_id INTEGER NOT NULL REFERENCES placement_reissue_batches(id),
+    old_placement_id INTEGER NOT NULL UNIQUE REFERENCES channel_placements(id),
+    new_placement_id INTEGER NOT NULL UNIQUE REFERENCES channel_placements(id),
+    old_credential_id INTEGER NOT NULL REFERENCES release_credentials(id),
+    new_credential_id INTEGER NOT NULL REFERENCES release_credentials(id)
+);
+CREATE TRIGGER placement_reissue_batches_no_update
+BEFORE UPDATE ON placement_reissue_batches
+BEGIN SELECT RAISE(ABORT, '凭据换发批次不可修改'); END;
+CREATE TRIGGER placement_reissue_batches_no_delete
+BEFORE DELETE ON placement_reissue_batches
+BEGIN SELECT RAISE(ABORT, '凭据换发批次不可删除'); END;
+CREATE TRIGGER placement_reissues_no_update
+BEFORE UPDATE ON placement_reissues
+BEGIN SELECT RAISE(ABORT, '凭据换发关联不可修改'); END;
+CREATE TRIGGER placement_reissues_no_delete
+BEFORE DELETE ON placement_reissues
+BEGIN SELECT RAISE(ABORT, '凭据换发关联不可删除'); END;
 """
 
 PUB_DATE = "2026-10-04"

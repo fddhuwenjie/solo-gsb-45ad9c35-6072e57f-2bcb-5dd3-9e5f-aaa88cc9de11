@@ -170,6 +170,14 @@ td.empty { color: var(--mute); text-align: center; }
   white-space: nowrap;
 }
 
+/* 凭据换发前后关联（投放列表附属行） */
+tr.subrow td {
+  padding: 2px 10px 8px;
+  background: var(--mute-bg);
+  font-size: 12.5px;
+}
+tr.subrow .badge { font-size: 11px; padding: 0 6px; }
+
 #placement-detail h3 { font-size: 15px; margin: 16px 0 8px; }
 #placement-detail h4 { font-size: 14px; margin: 14px 0 6px; }
 #placement-detail:empty { display: none; }

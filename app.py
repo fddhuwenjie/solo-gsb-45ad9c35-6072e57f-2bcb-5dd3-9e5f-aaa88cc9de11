@@ -9,6 +9,7 @@ from flask import Flask, g, jsonify, render_template, request
 import credentials
 import license_guard
 import placements
+import reissues
 from evaluator import MEDIA_LABELS, evaluate_timeline
 from remediation import run_remediation
 
@@ -94,6 +95,35 @@ CREATE TRIGGER IF NOT EXISTS channel_placements_no_reopen
 BEFORE UPDATE ON channel_placements
 WHEN OLD.status = 'withdrawn'
 BEGIN SELECT RAISE(ABORT, '投放记录已撤下，不可再修改'); END;
+-- 凭据换发：渠道内容迁至新链接后，同一访谈的在投投放批量换用新凭据。
+-- 每个批次一次提交；逐条保存旧投放 -> 新投放的前后关联（只增不改不删）。
+CREATE TABLE IF NOT EXISTS placement_reissue_batches (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    old_credential_id INTEGER NOT NULL REFERENCES release_credentials(id),
+    new_credential_id INTEGER NOT NULL REFERENCES release_credentials(id),
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS placement_reissues (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    batch_id INTEGER NOT NULL REFERENCES placement_reissue_batches(id),
+    old_placement_id INTEGER NOT NULL UNIQUE REFERENCES channel_placements(id),
+    new_placement_id INTEGER NOT NULL UNIQUE REFERENCES channel_placements(id),
+    old_credential_id INTEGER NOT NULL REFERENCES release_credentials(id),
+    new_credential_id INTEGER NOT NULL REFERENCES release_credentials(id)
+);
+-- 换发记录与批次只增不删、不可修改（可追溯）
+CREATE TRIGGER IF NOT EXISTS placement_reissue_batches_no_update
+BEFORE UPDATE ON placement_reissue_batches
+BEGIN SELECT RAISE(ABORT, '凭据换发批次不可修改'); END;
+CREATE TRIGGER IF NOT EXISTS placement_reissue_batches_no_delete
+BEFORE DELETE ON placement_reissue_batches
+BEGIN SELECT RAISE(ABORT, '凭据换发批次不可删除'); END;
+CREATE TRIGGER IF NOT EXISTS placement_reissues_no_update
+BEFORE UPDATE ON placement_reissues
+BEGIN SELECT RAISE(ABORT, '凭据换发关联不可修改'); END;
+CREATE TRIGGER IF NOT EXISTS placement_reissues_no_delete
+BEFORE DELETE ON placement_reissues
+BEGIN SELECT RAISE(ABORT, '凭据换发关联不可删除'); END;
 """
 
 app = Flask(__name__)
@@ -651,6 +681,43 @@ def withdraw_channel_placement(pid):
     result, status = placements.withdraw_placement(
         get_db(), placement_id=pid, reason=reason)
     return jsonify(result), status
+
+
+# ---------------------------------------------------------------- 凭据换发
+
+@app.post("/api/placements/reissue")
+def reissue_channel_placements():
+    """渠道内容迁至新链接后的凭据换发：提交旧凭据 ID、新凭据 ID，以及
+    旧凭据每条在投记录的新投放链接。同一 SQLite 写事务中校验新旧凭据
+    （不同且对应同一访谈、发布日期与媒介；新凭据与当前资料一致、整段
+    可发布）与清单（恰好覆盖旧凭据全部在投记录，每条一次），通过后把
+    旧投放标记已撤下、按原渠道与新链接登记新投放并逐条保存前后关联；
+    清单缺漏 / 重复、凭据失效或在投集合变化时整批失败
+    （旧记录不变，也不产生新投放）。"""
+    data = payload()
+    old_id = as_int(data.get("old_credential_id"))
+    new_id = as_int(data.get("new_credential_id"))
+    if old_id is None or old_id <= 0:
+        return error("old_credential_id 必须为正整数")
+    if new_id is None or new_id <= 0:
+        return error("new_credential_id 必须为正整数")
+    result, status = reissues.reissue_placements(
+        get_db(), old_credential_id=old_id, new_credential_id=new_id,
+        raw_items=data.get("items"))
+    return jsonify(result), status
+
+
+@app.get("/api/reissues")
+def list_reissues():
+    """凭据换发历史：批次列表（含逐条旧投放 -> 新投放前后关联）。"""
+    batches = reissues.list_reissues(get_db())
+    for batch in batches:
+        for item in batch["items"]:
+            item["old_status_label"] = placements.STATUS_LABELS[
+                item["old_status"]]
+            item["new_status_label"] = placements.STATUS_LABELS[
+                item["new_status"]]
+    return jsonify(batches)
 
 
 if __name__ == "__main__":

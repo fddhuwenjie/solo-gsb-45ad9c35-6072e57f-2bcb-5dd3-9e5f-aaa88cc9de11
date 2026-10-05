@@ -19,6 +19,7 @@ sqlite3.Row），不依赖 Flask，可独立测试。
 风险判定与凭据查阅口径完全一致。
 """
 import credentials
+import reissues
 
 # 投放状态
 STATUS_ACTIVE = "active"        # 投放中
@@ -166,7 +167,31 @@ def _risk_view(review):
             "changes": review["changes"]}
 
 
-def _list_item(placement, review):
+def _reissue_view(conn, placement_id):
+    """投放的凭据换发前后关联（补状态文案；无关联时两侧均为 None）。"""
+    link = reissues.placement_link(conn, placement_id)
+
+    def side(row, as_old):
+        if row is None:
+            return None
+        return {
+            "batch_id": row["batch_id"],
+            "other_placement_id": row["other_placement_id"],
+            "old_credential_id": row["old_credential_id"],
+            "new_credential_id": row["new_credential_id"],
+            "channel": row["channel"],
+            "url": row["url"],
+            "status": row["status"],
+            "status_label": STATUS_LABELS[row["status"]],
+            "interview_title": row["interview_title"],
+            "direction": "replaced_by" if as_old else "replaced",
+        }
+
+    return {"as_old": side(link["as_old"], True),
+            "as_new": side(link["as_new"], False)}
+
+
+def _list_item(conn, placement, review):
     return {
         "id": placement["id"],
         "credential_id": placement["credential_id"],
@@ -180,13 +205,14 @@ def _list_item(placement, review):
         "created_at": placement["created_at"],
         "withdrawn_at": placement["withdrawn_at"],
         **_risk_view(review),
+        "reissue": _reissue_view(conn, placement["id"]),
     }
 
 
-def _detail(placement, review):
+def _detail(conn, placement, review):
     current = review["current"]
     return {
-        **_list_item(placement, review),
+        **_list_item(conn, placement, review),
         "withdraw_reason": placement["withdraw_reason"],
         # 凭据与封存结论（不可修改，始终保留）
         "credential": {
@@ -209,7 +235,8 @@ def _detail(placement, review):
 def list_placements(conn):
     """列出全部投放记录（同一事务内逐条复核风险，读取快照一致）。
 
-    列表项含投放状态与凭据当前风险；历史链接、时间始终保留。
+    列表项含投放状态、凭据当前风险与凭据换发前后关联；
+    历史链接、时间始终保留。
     """
     conn.execute("BEGIN")
     try:
@@ -218,7 +245,7 @@ def list_placements(conn):
         items = []
         for row in rows:
             review = _review_credential(conn, row["credential_id"])
-            items.append(_list_item(_placement_dict(row), review))
+            items.append(_list_item(conn, _placement_dict(row), review))
         conn.rollback()  # 只读事务：释放快照，不落任何记录
     except Exception:
         conn.rollback()
@@ -227,7 +254,8 @@ def list_placements(conn):
 
 
 def placement_review(conn, placement_id):
-    """查阅单条投放记录：一致读取快照中的投放状态与凭据当前风险。
+    """查阅单条投放记录：一致读取快照中的投放状态、凭据当前风险与
+    凭据换发前后关联。
 
     返回投放详情（含封存结论与当前阻断区间）；记录不存在时返回 None。
     """
@@ -238,7 +266,7 @@ def placement_review(conn, placement_id):
             conn.rollback()
             return None
         review = _review_credential(conn, row["credential_id"])
-        detail = _detail(_placement_dict(row), review)
+        detail = _detail(conn, _placement_dict(row), review)
         conn.rollback()  # 只读事务：释放快照
     except Exception:
         conn.rollback()

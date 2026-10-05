@@ -206,6 +206,34 @@
       <tbody id="placements-body"></tbody>
     </table>
     <div id="placement-detail"></div>
+
+    <h3>凭据换发（渠道内容迁至新链接）</h3>
+    <p class="hint">
+      渠道内容迁移到新链接后，为同一访谈的在投投放整批换发凭据：选择旧凭据与新凭据，
+      点「载入旧凭据在投记录」得到逐条清单（恰好覆盖其全部在投记录），逐行填写新投放链接后提交。
+      新旧凭据必须不同且对应同一访谈、发布日期与媒介，新凭据须与当前资料一致、整段可发布；
+      系统在同一写事务中把旧投放标记已撤下、按原渠道与新链接登记新投放并保存逐条前后关联 ——
+      清单缺漏 / 重复、凭据失效或在投集合变化时整批失败，旧记录不变，也不产生新投放。
+      换发后的新投放继续参与授权变更保护。
+    </p>
+    <div class="row">
+      <label>旧凭据 <select id="reissue-old-credential"></select></label>
+      <label>新凭据 <select id="reissue-new-credential"></select></label>
+      <button id="btn-reissue-load">载入旧凭据在投记录</button>
+    </div>
+    <table>
+      <thead>
+        <tr><th>在投投放</th><th>渠道</th><th>原投放链接</th><th>新投放链接</th></tr>
+      </thead>
+      <tbody id="reissue-items-body"></tbody>
+    </table>
+    <div class="row">
+      <button id="btn-reissue-submit" class="primary">提交凭据换发</button>
+      <button id="btn-reissue-clear">清空清单</button>
+      <button id="btn-refresh-reissues">刷新换发历史</button>
+    </div>
+    <div id="reissue-result"></div>
+    <div id="reissue-history"></div>
   </section>
 
   <p id="status-line" role="status"></p>
