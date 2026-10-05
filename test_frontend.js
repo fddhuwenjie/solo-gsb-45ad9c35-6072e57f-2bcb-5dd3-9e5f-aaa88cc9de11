@@ -8,7 +8,8 @@
  *  5. 补件批次渲染、试算请求体与试算结果展示；
  *  6. 发行凭据列表渲染、封存请求体、409 阻断展示与查阅复核视图；
  *  7. 渠道投放台账列表渲染、登记请求体、409 原因展示、查阅风险视图与撤下；
- *  8. 授权编辑 / 删除被提交前复核拦截（409）时的受影响投放与阻断明细展示。 */
+ *  8. 授权编辑 / 删除被提交前复核拦截（409）时的受影响投放与阻断明细展示；
+ *  9. 凭据换发清单渲染、换发请求体、成功后刷新、409 在投集合不符与关联 / 批次展示。 */
 const fs = require("fs");
 const vm = require("vm");
 const assert = require("assert");
@@ -46,6 +47,9 @@ const sandbox = {
       if (path === "/api/placements") {
         return { ok: true, status: 200, json: async () => sandbox.__placementList || [] };
       }
+      if (path === "/api/reissues") {
+        return { ok: true, status: 200, json: async () => sandbox.__reissueList || [] };
+      }
       if (path.startsWith("/api/placements/")) {
         return { ok: true, status: 200, json: async () => sandbox.__placementDetail };
       }
@@ -59,6 +63,9 @@ const sandbox = {
     }
     if (path.endsWith("/placements") && opts && opts.method === "POST") {
       return sandbox.__placementCreate();
+    }
+    if (path.match(/\/api\/credentials\/\d+\/reissue$/) && opts && opts.method === "POST") {
+      return sandbox.__reissueCreate();
     }
     if (path.endsWith("/withdraw")) {
       return { ok: true, status: 200, json: async () => sandbox.__withdrawResponse };
@@ -76,7 +83,7 @@ const sandbox = {
 vm.createContext(sandbox);
 const code = fs.readFileSync("static/app.js", "utf8");
 vm.runInContext(
-  code + "\nglobalThis.__test__ = { state, render, renderResults, saveSegment, saveLicense, delLicense, fmt, parseTimecode, renderRemediate, submitRemediate, renderCredentials, createCredential, viewCredential, renderPlacements, createPlacement, viewPlacement, withdrawPlacement };",
+  code + "\nglobalThis.__test__ = { state, render, renderResults, saveSegment, saveLicense, delLicense, fmt, parseTimecode, renderRemediate, submitRemediate, renderCredentials, createCredential, viewCredential, renderPlacements, createPlacement, viewPlacement, withdrawPlacement, renderReissueEditor, renderReissueLog, submitReissue, reissueLinkHtml, placementReissueHtml };",
   sandbox
 );
 const T = sandbox.__test__;
@@ -466,6 +473,180 @@ async function main() {
   await T.saveLicense(20);
   assert.strictEqual(elements.get("license-guard-result").innerHTML, "",
     "变更成功后应清空拦截明细");
+
+  // 9. 凭据换发：清单渲染、请求体、成功刷新、409 集合不符与关联展示
+  // 两条旧凭据 c5/c6 + 两条 c5 在投投放
+  T.state.credentials = [
+    { id: 5, interview_id: 1, interview_title: "示例", medium: "audio",
+      publication_date: "2026-10-04", created_at: "", status: "valid",
+      status_label: "与发行时一致", changes: [] },
+    { id: 6, interview_id: 1, interview_title: "示例", medium: "audio",
+      publication_date: "2026-10-04", created_at: "", status: "valid",
+      status_label: "与发行时一致", changes: [] },
+  ];
+  T.state.placements = [
+    { id: 7, credential_id: 5, interview_title: "示例", medium: "audio",
+      publication_date: "2026-10-04", channel: "官网", url: "https://old/a",
+      status: "active", status_label: "投放中", created_at: "", withdrawn_at: null,
+      risk: "ok", risk_label: "正常", changes: [], reissue: null },
+    { id: 8, credential_id: 5, interview_title: "示例", medium: "audio",
+      publication_date: "2026-10-04", channel: "播客", url: "https://old/b",
+      status: "active", status_label: "投放中", created_at: "", withdrawn_at: null,
+      risk: "ok", risk_label: "正常", changes: [], reissue: null },
+  ];
+  T.state.reissueBatches = [];
+  T.state.reissueOldId = 5;
+  T.state.reissueNewId = 6;
+  T.renderPlacements();
+  // 旧 / 新凭据下拉含两条凭据
+  assert.ok(elements.get("reissue-old").innerHTML.includes("#5 示例"));
+  assert.ok(elements.get("reissue-new").innerHTML.includes("#6 示例"));
+  // 清单恰好覆盖两条在投投放，含旧渠道、旧链接与新链接输入框
+  const editHtml = elements.get("reissue-items-body").innerHTML;
+  assert.ok(editHtml.includes("#7") && editHtml.includes("#8"), "清单应列出旧投放 ID");
+  assert.ok(editHtml.includes("https://old/a"), "清单应含旧链接");
+  for (const id of ["reissue-url-7", "reissue-url-8"]) {
+    assert.ok(editHtml.includes(`id="${id}"`), `清单缺少新链接输入 ${id}`);
+  }
+  assert.ok(editHtml.includes("播客"), "清单应保留原渠道");
+
+  // 成功换发：请求体恰好覆盖在投集合，每条带新链接
+  el("reissue-url-7").value = "https://new/a";
+  el("reissue-url-8").value = "https://new/b";
+  sandbox.__reissueCreate = () => ({
+    ok: true, status: 201,
+    json: async () => ({
+      id: 3, reissued: true, old_credential_id: 5, new_credential_id: 6,
+      interview_id: 1, interview_title: "示例", medium: "audio",
+      publication_date: "2026-10-04", created_at: "2026-10-05 12:00:00",
+      count: 2,
+      links: [
+        { old_placement_id: 7, new_placement_id: 9, channel: "官网",
+          old_url: "https://old/a", new_url: "https://new/a" },
+        { old_placement_id: 8, new_placement_id: 10, channel: "播客",
+          old_url: "https://old/b", new_url: "https://new/b" },
+      ],
+    }),
+  });
+  // refreshDetail 会重新拉取凭据 / 投放 / 换发列表：提供换发后的桩数据
+  sandbox.__credList = T.state.credentials;
+  sandbox.__placementList = [
+    { id: 7, credential_id: 5, interview_title: "示例", medium: "audio",
+      publication_date: "2026-10-04", channel: "官网", url: "https://old/a",
+      status: "withdrawn", status_label: "已撤下", created_at: "",
+      withdrawn_at: "2026-10-05 12:00:00",
+      risk: "ok", risk_label: "正常", changes: [],
+      reissue: { reissue_id: 3, role: "old", other_placement_id: 9,
+                 other_url: "https://new/a", channel: "官网" } },
+    { id: 8, credential_id: 5, interview_title: "示例", medium: "audio",
+      publication_date: "2026-10-04", channel: "播客", url: "https://old/b",
+      status: "withdrawn", status_label: "已撤下", created_at: "",
+      withdrawn_at: "2026-10-05 12:00:00",
+      risk: "ok", risk_label: "正常", changes: [],
+      reissue: { reissue_id: 3, role: "old", other_placement_id: 10,
+                 other_url: "https://new/b", channel: "播客" } },
+    { id: 9, credential_id: 6, interview_title: "示例", medium: "audio",
+      publication_date: "2026-10-04", channel: "官网", url: "https://new/a",
+      status: "active", status_label: "投放中", created_at: "", withdrawn_at: null,
+      risk: "ok", risk_label: "正常", changes: [],
+      reissue: { reissue_id: 3, role: "new", other_placement_id: 7,
+                 other_url: "https://old/a", channel: "官网" } },
+    { id: 10, credential_id: 6, interview_title: "示例", medium: "audio",
+      publication_date: "2026-10-04", channel: "播客", url: "https://new/b",
+      status: "active", status_label: "投放中", created_at: "", withdrawn_at: null,
+      risk: "ok", risk_label: "正常", changes: [],
+      reissue: { reissue_id: 3, role: "new", other_placement_id: 8,
+                 other_url: "https://old/b", channel: "播客" } },
+  ];
+  sandbox.__reissueList = [{
+    id: 3, old_credential_id: 5, new_credential_id: 6,
+    created_at: "2026-10-05 12:00:00", count: 2,
+    links: [
+      { old_placement_id: 7, new_placement_id: 9, channel: "官网",
+        old_url: "https://old/a", new_url: "https://new/a" },
+      { old_placement_id: 8, new_placement_id: 10, channel: "播客",
+        old_url: "https://old/b", new_url: "https://new/b" },
+    ],
+  }];
+  await T.submitReissue();
+  const rePost = calls.filter(
+    (c) => c.path === "/api/credentials/5/reissue"
+      && c.opts && c.opts.method === "POST").pop();
+  assert.ok(rePost, "应发出凭据换发请求");
+  assert.deepStrictEqual(JSON.parse(rePost.opts.body), {
+    new_credential_id: 6,
+    items: [
+      { placement_id: 7, new_url: "https://new/a" },
+      { placement_id: 8, new_url: "https://new/b" },
+    ],
+  });
+  assert.ok(elements.get("reissue-result").innerHTML.includes("换发批次 #3 已办理"),
+    "成功后应提示已办理");
+  // 换发记录渲染：旧 / 新链接与投放 ID
+  const logHtml = elements.get("reissue-log").innerHTML;
+  assert.ok(logHtml.includes("旧凭据 #5 → 新凭据 #6"), "换发记录应标注新旧凭据");
+  assert.ok(logHtml.includes("https://old/a") && logHtml.includes("https://new/b"),
+    "换发记录应含逐条旧 / 新链接");
+  assert.ok(logHtml.includes("#9") && logHtml.includes("#10"), "换发记录应含新投放 ID");
+
+  // 列表单元格的换发关联：旧 / 新角色互指
+  assert.strictEqual(T.reissueLinkHtml(null), "—", "未参与换发应显示 —");
+  const oldCell = T.reissueLinkHtml({
+    reissue_id: 3, role: "old", other_placement_id: 9,
+    other_url: "https://new/a", channel: "官网",
+  });
+  assert.ok(oldCell.includes("新投放") && oldCell.includes("#9")
+    && oldCell.includes("https://new/a"), "旧投放单元格应指向新投放");
+  const newCell = T.reissueLinkHtml({
+    reissue_id: 3, role: "new", other_placement_id: 7,
+    other_url: "https://old/a", channel: "官网",
+  });
+  assert.ok(newCell.includes("旧投放") && newCell.includes("https://old/a"),
+    "新投放单元格应指向旧投放");
+  // 详情块：新投放提示继续参与授权变更保护
+  const detailBlock = T.placementReissueHtml({
+    reissue_id: 3, role: "new", other_placement_id: 7,
+    other_url: "https://old/a", channel: "官网",
+  });
+  assert.ok(detailBlock.includes("继续参与授权变更保护"),
+    "换发后的投放详情应提示授权变更保护");
+  assert.strictEqual(T.placementReissueHtml(null), "",
+    "未参与换发时详情不显示关联块");
+
+  // 409 在投集合不符：错误消息含缺漏 / 多余，清单随后按最新集合重建
+  const latestActive = [{
+    id: 7, credential_id: 5, interview_title: "示例", medium: "audio",
+    publication_date: "2026-10-04", channel: "官网", url: "https://old/a",
+    status: "active", status_label: "投放中", created_at: "", withdrawn_at: null,
+    risk: "ok", risk_label: "正常", changes: [], reissue: null,
+  }];
+  // 提交前清单仍按旧的两条在投投放填写（页面保留 p7/p8 输入）
+  el("reissue-url-7") && (el("reissue-url-7").value = "https://new/a");
+  el("reissue-url-8") && (el("reissue-url-8").value = "https://new/b");
+  // refreshDetail 的 GET 桩返回最新在投集合：p8 已撤下，只剩 p7
+  sandbox.__placementList = latestActive;
+  sandbox.__reissueCreate = () => ({
+    ok: false, status: 409,
+    json: async () => ({
+      old_credential_id: 5, new_credential_id: 6, reissued: false,
+      reason: "missing_entry",
+      missing_placement_ids: [], unexpected_placement_ids: [8],
+      active_placement_ids: [7],
+      error: "换发清单必须恰好覆盖旧凭据的全部在投记录（不属于在投集合：[8]），整批失败，未改动任何记录",
+    }),
+  });
+  // 提交时 state 仍是旧的两条在投投放（清单含 p8），服务器判 409
+  T.state.placements = [
+    latestActive[0],
+    { id: 8, credential_id: 5, interview_title: "示例", medium: "audio",
+      publication_date: "2026-10-04", channel: "播客", url: "https://old/b",
+      status: "active", status_label: "投放中", created_at: "", withdrawn_at: null,
+      risk: "ok", risk_label: "正常", changes: [], reissue: null },
+  ];
+  await assert.rejects(T.submitReissue(), /不属于在投集合/);
+  const rebuilt = elements.get("reissue-items-body").innerHTML;
+  assert.ok(rebuilt.includes("#7") && !rebuilt.includes("#8"),
+    "409 后应按最新在投集合重建清单");
 
   console.log("test_frontend.js: 全部通过");
 }

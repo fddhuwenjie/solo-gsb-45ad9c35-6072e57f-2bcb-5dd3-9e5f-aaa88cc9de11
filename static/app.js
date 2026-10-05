@@ -18,6 +18,9 @@ const state = {
   placements: [], // 渠道投放台账列表（含投放状态与凭据风险）
   placementDetail: null, // 正在查阅的投放记录详情
   placementCredentialId: null, // 登记投放时选中的凭据
+  reissueBatches: [], // 凭据换发批次列表（含逐条前后关联）
+  reissueOldId: null, // 办理换发时选中的旧凭据
+  reissueNewId: null, // 办理换发时选中的新凭据
   licenseGuard: null, // 授权编辑 / 删除被拦截的明细（409 affected_placements）
 };
 
@@ -102,6 +105,7 @@ async function refreshDetail() {
   // 资料变化会影响凭据状态（待复核 / 来源缺失）与投放风险，随访谈详情一并刷新
   state.credentials = await api("/api/credentials");
   state.placements = await api("/api/placements");
+  state.reissueBatches = await api("/api/reissues");
 }
 
 async function loadCredentials() {
@@ -112,6 +116,11 @@ async function loadCredentials() {
 async function loadPlacements() {
   state.placements = await api("/api/placements");
   renderPlacements();
+}
+
+async function loadReissues() {
+  state.reissueBatches = await api("/api/reissues");
+  renderReissueLog();
 }
 
 /* ---------- 渲染 ---------- */
@@ -717,6 +726,7 @@ function renderPlacements() {
         + `>#${c.id} ${esc(c.interview_title)}（${esc(c.publication_date)}`
         + ` · ${mediumLabel(c.medium)}）</option>`).join("")
     : `<option value="">（暂无发行凭据，请先封存）</option>`;
+  renderReissueSelectors();
   const rows = state.placements.map((p) => `
     <tr>
       <td>#${p.id}</td>
@@ -729,6 +739,7 @@ function renderPlacements() {
         ? `<br><span class="hint">撤下于 ${esc(p.withdrawn_at)}</span>` : ""}</td>
       <td>${statusBadge(p.risk, p.risk_label)}${p.changes.length
         ? `<br><span class="hint">变化：${esc(p.changes.join("、"))}</span>` : ""}</td>
+      <td class="reissue-link">${reissueLinkHtml(p.reissue)}</td>
       <td>
         <button onclick="run(() => viewPlacement(${p.id}))">查阅</button>
         ${p.status === "active"
@@ -737,7 +748,96 @@ function renderPlacements() {
       </td>
     </tr>`).join("");
   $("placements-body").innerHTML =
-    rows || `<tr><td colspan="9" class="empty">暂无投放记录</td></tr>`;
+    rows || `<tr><td colspan="10" class="empty">暂无投放记录</td></tr>`;
+  renderReissueEditor();
+  renderReissueLog();
+}
+
+/* 换发关联单元格：未参与换发显示 —；旧 / 新投放互相对端链接 */
+function reissueLinkHtml(reissue) {
+  if (!reissue) return "—";
+  const arrow = reissue.role === "old" ? "→ 新投放" : "← 旧投放";
+  const pid = reissue.role === "old" ? "新投放" : "旧投放";
+  return `<span class="hint">批次 #${reissue.reissue_id} · ${arrow}
+      #${reissue.other_placement_id}<br></span>
+    <a href="${esc(reissue.other_url)}" target="_blank" rel="noopener"
+       title="${pid}链接（${esc(reissue.channel)}）">${esc(reissue.other_url)}</a>`;
+}
+
+/* 投放详情中的换发关联说明块（未参与换发不显示） */
+function placementReissueHtml(reissue) {
+  if (!reissue) return "";
+  const isOld = reissue.role === "old";
+  return `<p class="${isOld ? "hint" : "ok-text"}">换发关联：批次 #${reissue.reissue_id}`
+    + ` · ${isOld
+      ? "本投放为旧投放，换发时已按原渠道登记新投放"
+      : "本投放由凭据换发按原渠道登记，继续参与授权变更保护"}`
+    + `（${esc(reissue.channel)}）：${isOld ? "新" : "旧"}投放 #${reissue.other_placement_id}
+    <a href="${esc(reissue.other_url)}" target="_blank" rel="noopener">${esc(reissue.other_url)}</a></p>`;
+}
+
+/* 凭据换发：旧 / 新凭据选择框 */
+function credentialOption(c, selectedId) {
+  return `<option value="${c.id}"${c.id === selectedId ? " selected" : ""}`
+    + `>#${c.id} ${esc(c.interview_title)}（${esc(c.publication_date)}`
+    + ` · ${mediumLabel(c.medium)}）</option>`;
+}
+
+function renderReissueSelectors() {
+  const oldSel = $("reissue-old");
+  const newSel = $("reissue-new");
+  const oldId = Number(oldSel.value) || null;
+  const newId = Number(newSel.value) || null;
+  if (oldId !== null) state.reissueOldId = oldId;
+  if (newId !== null) state.reissueNewId = newId;
+  const options = state.credentials.length
+    ? state.credentials.map((c) => credentialOption(c, c.id)).join("")
+    : "";
+  oldSel.innerHTML = options
+    || `<option value="">（暂无发行凭据，请先封存）</option>`;
+  newSel.innerHTML = options
+    || `<option value="">（暂无发行凭据，请先封存）</option>`;
+  // 初次渲染：旧凭据默认选第一条；新凭据选另一条（若存在）
+  if (state.credentials.length) {
+    if (!state.credentials.some((c) => c.id === state.reissueOldId)) {
+      state.reissueOldId = state.credentials[0].id;
+    }
+    const diff = state.credentials.find((c) => c.id !== state.reissueOldId);
+    if (!state.credentials.some((c) => c.id === state.reissueNewId)
+        || state.reissueNewId === state.reissueOldId) {
+      state.reissueNewId = diff ? diff.id : state.credentials[0].id;
+    }
+    oldSel.value = String(state.reissueOldId);
+    newSel.value = String(state.reissueNewId);
+  }
+}
+
+/* 旧凭据当前的在投投放（换发清单来源） */
+function activePlacementsOf(credentialId) {
+  return state.placements.filter(
+    (p) => p.credential_id === credentialId && p.status === "active");
+}
+
+/* 按旧凭据在投集合渲染逐条新链接编辑表（恰好覆盖、每条一行） */
+function renderReissueEditor() {
+  const body = $("reissue-items-body");
+  if (!body) return;
+  const active = activePlacementsOf(state.reissueOldId);
+  if (!state.credentials.length) {
+    body.innerHTML = `<tr><td colspan="4" class="empty">暂无发行凭据</td></tr>`;
+    return;
+  }
+  if (!active.length) {
+    body.innerHTML = `<tr><td colspan="4" class="empty">该凭据当前没有在投投放，无需换发</td></tr>`;
+    return;
+  }
+  body.innerHTML = active.map((p) => `
+    <tr>
+      <td>#${p.id}</td>
+      <td>${esc(p.channel)}</td>
+      <td class="url-cell"><a href="${esc(p.url)}" target="_blank" rel="noopener">${esc(p.url)}</a></td>
+      <td><input id="reissue-url-${p.id}" placeholder="新投放链接 https://…"></td>
+    </tr>`).join("");
 }
 
 /* 登记失败（409）：说明原因，不落任何记录 */
@@ -770,7 +870,8 @@ function renderPlacementDetail() {
       · 投放状态 ${statusBadge(d.status, d.status_label)}
       · 凭据风险 ${statusBadge(d.risk, d.risk_label)}${d.changes.length
         ? `（变化：${esc(d.changes.join("、"))}）` : ""}
-    </div>`;
+    </div>
+    ${placementReissueHtml(d.reissue)}`;
   if (d.status === "withdrawn") {
     html += `<p class="hint">已撤下于 <span class="tc">${esc(d.withdrawn_at)}</span>`
       + `${d.withdraw_reason ? `，原因：${esc(d.withdraw_reason)}` : ""}。</p>`;
@@ -851,6 +952,88 @@ async function withdrawPlacement(id) {
   }
 }
 
+/* ---------- 凭据换发 ---------- */
+
+async function submitReissue() {
+  const oldId = Number($("reissue-old").value);
+  const newId = Number($("reissue-new").value);
+  state.reissueOldId = oldId || null;
+  state.reissueNewId = newId || null;
+  if (!oldId) throw new Error("请选择旧凭据");
+  if (!newId) throw new Error("请选择新凭据");
+  if (oldId === newId) throw new Error("新旧凭据必须不同");
+  const active = activePlacementsOf(oldId);
+  if (!active.length) throw new Error("旧凭据当前没有在投投放，无需换发");
+  const items = [];
+  for (const p of active) {
+    const newUrl = $(`reissue-url-${p.id}`).value.trim();
+    if (!newUrl) {
+      throw new Error(`请为旧投放 #${p.id}（${p.channel}）填写新投放链接`);
+    }
+    items.push({ placement_id: p.id, new_url: newUrl });
+  }
+  let resp;
+  try {
+    resp = await fetch(`/api/credentials/${oldId}/reissue`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ new_credential_id: newId, items }),
+    });
+  } catch (e) {
+    throw new Error("无法连接服务器");
+  }
+  const data = await resp.json().catch(() => ({}));
+  if (resp.status === 409 && data.reason === "missing_entry") {
+    // 在投集合已变化或清单不符：整批失败，刷新后用最新在投集合重建清单
+    await refreshDetail();
+    render();
+    const parts = [];
+    if (data.missing_placement_ids && data.missing_placement_ids.length) {
+      parts.push(`缺漏 ${data.missing_placement_ids.join("、")}`);
+    }
+    if (data.unexpected_placement_ids && data.unexpected_placement_ids.length) {
+      parts.push(`不属于在投集合 ${data.unexpected_placement_ids.join("、")}`);
+    }
+    throw new Error(`${data.error || "换发清单与在投集合不符"}（${parts.join("；")}），已按最新在投记录重建清单`);
+  }
+  if (!resp.ok) throw new Error(data.error || `请求失败（HTTP ${resp.status}）`);
+  // 成功：清空新链接输入，刷新投放 / 凭据 / 换发记录并重建清单
+  await refreshDetail();
+  render();
+  $("reissue-result").innerHTML =
+    `<p class="ok-text">✔ 换发批次 #${data.id} 已办理：${data.count} 条旧投放已撤下，`
+    + `按原渠道与新链接登记的新投放已在投（凭据 #${data.new_credential_id}）。</p>`;
+}
+
+function renderReissueLog() {
+  const box = $("reissue-log");
+  if (!box) return;
+  if (!state.reissueBatches.length) {
+    box.innerHTML = "";
+    return;
+  }
+  // 最新批次在前
+  const batches = [...state.reissueBatches].reverse();
+  box.innerHTML = `<h4>换发记录（${state.reissueBatches.length} 批）</h4>`
+    + batches.map((b) => `
+      <div class="reissue-batch">
+        <p class="hint">批次 #${b.id} · <span class="tc">${esc(b.created_at)}</span>
+          · 旧凭据 #${b.old_credential_id} → 新凭据 #${b.new_credential_id}
+          · ${b.count} 条</p>
+        <table>
+          <thead><tr><th>旧投放</th><th>渠道</th><th>旧链接</th><th>新链接</th><th>新投放</th></tr></thead>
+          <tbody>${b.links.map((l) => `
+            <tr>
+              <td>#${l.old_placement_id}</td>
+              <td>${esc(l.channel)}</td>
+              <td class="url-cell"><a href="${esc(l.old_url)}" target="_blank" rel="noopener">${esc(l.old_url)}</a></td>
+              <td class="url-cell"><a href="${esc(l.new_url)}" target="_blank" rel="noopener">${esc(l.new_url)}</a></td>
+              <td>#${l.new_placement_id}</td>
+            </tr>`).join("")}</tbody>
+        </table>
+      </div>`).join("");
+}
+
 /* ---------- 启动 ---------- */
 
 window.addEventListener("DOMContentLoaded", () => {
@@ -870,6 +1053,21 @@ window.addEventListener("DOMContentLoaded", () => {
   $("btn-refresh-credentials").addEventListener("click", () => run(loadCredentials));
   $("btn-create-placement").addEventListener("click", () => run(createPlacement));
   $("btn-refresh-placements").addEventListener("click", () => run(loadPlacements));
+  $("btn-reissue-submit").addEventListener("click", () => run(submitReissue));
+  $("btn-refresh-reissues").addEventListener("click", () => run(loadReissues));
+  $("reissue-old").addEventListener("change", (e) => {
+    state.reissueOldId = Number(e.target.value) || null;
+    // 新凭据默认选另一条
+    const diff = state.credentials.find((c) => c.id !== state.reissueOldId);
+    if (diff && state.reissueNewId === state.reissueOldId) {
+      state.reissueNewId = diff.id;
+      $("reissue-new").value = String(diff.id);
+    }
+    renderReissueEditor();
+  });
+  $("reissue-new").addEventListener("change", (e) => {
+    state.reissueNewId = Number(e.target.value) || null;
+  });
   $("placement-credential").addEventListener("change", (e) => {
     state.placementCredentialId = Number(e.target.value) || null;
   });

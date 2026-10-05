@@ -9,6 +9,7 @@ from flask import Flask, g, jsonify, render_template, request
 import credentials
 import license_guard
 import placements
+import reissues
 from evaluator import MEDIA_LABELS, evaluate_timeline
 from remediation import run_remediation
 
@@ -94,6 +95,40 @@ CREATE TRIGGER IF NOT EXISTS channel_placements_no_reopen
 BEFORE UPDATE ON channel_placements
 WHEN OLD.status = 'withdrawn'
 BEGIN SELECT RAISE(ABORT, '投放记录已撤下，不可再修改'); END;
+-- 凭据换发批次：渠道内容迁至新链接后，以新凭据为同一访谈的在投投放
+-- 整批换发。换发批次只增不删，关键字段不可修改。
+CREATE TABLE IF NOT EXISTS placement_reissues (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    old_credential_id INTEGER NOT NULL REFERENCES release_credentials(id),
+    new_credential_id INTEGER NOT NULL REFERENCES release_credentials(id),
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    CHECK (old_credential_id <> new_credential_id)
+);
+-- 逐条前后关联：每条旧在投投放 -> 按原渠道、新链接登记的新投放。
+-- 关联一旦建立不可修改；每条投放至多作为一次换发的旧记录 / 新记录。
+CREATE TABLE IF NOT EXISTS placement_reissue_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    reissue_id INTEGER NOT NULL REFERENCES placement_reissues(id),
+    old_placement_id INTEGER NOT NULL UNIQUE
+        REFERENCES channel_placements(id),
+    new_placement_id INTEGER NOT NULL UNIQUE
+        REFERENCES channel_placements(id),
+    channel TEXT NOT NULL,
+    old_url TEXT NOT NULL,
+    new_url TEXT NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS placement_reissues_no_delete
+BEFORE DELETE ON placement_reissues
+BEGIN SELECT RAISE(ABORT, '换发批次不可删除'); END;
+CREATE TRIGGER IF NOT EXISTS placement_reissues_no_update
+BEFORE UPDATE ON placement_reissues
+BEGIN SELECT RAISE(ABORT, '换发批次不可修改'); END;
+CREATE TRIGGER IF NOT EXISTS placement_reissue_items_no_delete
+BEFORE DELETE ON placement_reissue_items
+BEGIN SELECT RAISE(ABORT, '换发关联不可删除'); END;
+CREATE TRIGGER IF NOT EXISTS placement_reissue_items_no_update
+BEFORE UPDATE ON placement_reissue_items
+BEGIN SELECT RAISE(ABORT, '换发关联不可修改'); END;
 """
 
 app = Flask(__name__)
@@ -630,14 +665,18 @@ def create_placement(cid):
 @app.get("/api/placements")
 def list_channel_placements():
     """投放列表：一致读取快照中展示投放状态与凭据当前风险
-    （正常 / 需处理 / 来源缺失），历史链接与时间始终保留。"""
-    return jsonify(placements.list_placements(get_db()))
+    （正常 / 需处理 / 来源缺失），并附凭据换发前后关联；
+    历史链接与时间始终保留。"""
+    return jsonify(placements.list_placements(
+        get_db(), enrich=reissues.attach_links))
 
 
 @app.get("/api/placements/<int:pid>")
 def channel_placement_detail(pid):
-    """投放详情：投放状态、封存结论与凭据当前风险（含当前阻断区间）。"""
-    detail = placements.placement_review(get_db(), pid)
+    """投放详情：投放状态、封存结论与凭据当前风险（含当前阻断区间），
+    以及凭据换发前后关联（未参与换发时 reissue 为 null）。"""
+    detail = placements.placement_review(
+        get_db(), pid, enrich=reissues.attach_links)
     if detail is None:
         return error("投放记录不存在", 404)
     return jsonify(detail)
@@ -651,6 +690,41 @@ def withdraw_channel_placement(pid):
     result, status = placements.withdraw_placement(
         get_db(), placement_id=pid, reason=reason)
     return jsonify(result), status
+
+
+# ---------------------------------------------------------------- 凭据换发
+
+@app.post("/api/credentials/<int:cid>/reissue")
+def reissue_credential_placements(cid):
+    """凭据换发：渠道内容迁至新链接后，提交新凭据 ID 与旧凭据每条
+    在投记录的新投放链接。同一 SQLite 写事务中复核新旧凭据
+    （不同、对应同一访谈 / 发布日期 / 媒介，新凭据与当前资料一致、
+    整段可发布）与清单（恰好覆盖旧凭据全部在投记录，每条一次），
+    通过后把旧投放标记已撤下、按原渠道与新链接登记新投放并保存
+    逐条关联；任一条件不满足整批失败，旧记录不变，也不产生新投放。"""
+    data = payload()
+    new_credential_id = as_int(data.get("new_credential_id"))
+    if new_credential_id is None:
+        return error("新凭据 ID 必须为整数")
+    result, status = reissues.reissue_placements(
+        get_db(), old_credential_id=cid,
+        new_credential_id=new_credential_id, raw_items=data.get("items"))
+    return jsonify(result), status
+
+
+@app.get("/api/reissues")
+def list_reissues():
+    """换发批次列表：每批含新旧凭据 ID 与逐条前后关联。"""
+    return jsonify(reissues.list_reissues(get_db()))
+
+
+@app.get("/api/reissues/<int:rid>")
+def reissue_detail(rid):
+    """换发批次详情：新旧凭据要点与逐条前后关联。"""
+    detail = reissues.reissue_detail(get_db(), rid)
+    if detail is None:
+        return error("换发批次不存在", 404)
+    return jsonify(detail)
 
 
 if __name__ == "__main__":

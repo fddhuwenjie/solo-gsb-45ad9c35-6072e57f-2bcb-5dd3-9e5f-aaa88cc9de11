@@ -200,12 +200,36 @@
       <thead>
         <tr>
           <th>ID</th><th>凭据</th><th>访谈</th><th>渠道</th><th>投放链接</th>
-          <th>登记时间</th><th>投放状态</th><th>凭据风险</th><th>操作</th>
+          <th>登记时间</th><th>投放状态</th><th>凭据风险</th><th>换发关联</th><th>操作</th>
         </tr>
       </thead>
       <tbody id="placements-body"></tbody>
     </table>
     <div id="placement-detail"></div>
+
+    <h3 class="subsection">凭据换发（渠道内容迁至新链接）</h3>
+    <p class="hint">
+      渠道内容迁到新链接后，为同一访谈的渠道投放办理凭据换发：选择旧凭据与新凭据，
+      系统按旧凭据的全部在投记录生成清单，逐条填写新链接后一次性办理。
+      新旧凭据必须不同，且对应同一访谈、发布日期和媒介；新凭据须与当前资料一致、整段可发布。
+      同一写事务内旧投放标记已撤下、按原渠道与新链接登记新投放并保存逐条关联；
+      清单缺漏或重复、凭据失效或在投集合变化时整批失败，旧记录不变，也不产生新投放。
+      换发后的投放继续参与授权变更保护。
+    </p>
+    <div class="row">
+      <label>旧凭据 <select id="reissue-old"></select></label>
+      <label>新凭据 <select id="reissue-new"></select></label>
+      <button id="btn-reissue-submit" class="primary">按清单办理换发</button>
+      <button id="btn-refresh-reissues">刷新换发记录</button>
+    </div>
+    <table id="reissue-edit-table">
+      <thead>
+        <tr><th>旧投放</th><th>渠道</th><th>旧链接</th><th>新投放链接</th></tr>
+      </thead>
+      <tbody id="reissue-items-body"></tbody>
+    </table>
+    <div id="reissue-result"></div>
+    <div id="reissue-log"></div>
   </section>
 
   <p id="status-line" role="status"></p>

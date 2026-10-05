@@ -174,6 +174,19 @@ td.empty { color: var(--mute); text-align: center; }
 #placement-detail h4 { font-size: 14px; margin: 14px 0 6px; }
 #placement-detail:empty { display: none; }
 
+.subsection {
+  margin: 22px 0 8px;
+  font-size: 15px;
+  border-left: 4px solid var(--accent);
+  padding-left: 8px;
+}
+
+#reissue-edit-table { margin: 10px 0; }
+#reissue-edit-table input { width: 100%; min-width: 260px; }
+#reissue-result:not(:empty), #reissue-log:not(:empty) { margin-top: 12px; }
+#reissue-log h4 { font-size: 14px; margin: 12px 0 6px; }
+.reissue-link { font-size: 12.5px; white-space: nowrap; }
+
 #credential-detail h3 { font-size: 15px; margin: 16px 0 8px; }
 #credential-detail h4 { font-size: 14px; margin: 14px 0 6px; }
 #credential-detail:empty { display: none; }

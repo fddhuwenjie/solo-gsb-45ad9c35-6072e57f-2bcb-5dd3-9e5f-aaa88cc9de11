@@ -206,10 +206,12 @@ def _detail(placement, review):
     }
 
 
-def list_placements(conn):
+def list_placements(conn, enrich=None):
     """列出全部投放记录（同一事务内逐条复核风险，读取快照一致）。
 
     列表项含投放状态与凭据当前风险；历史链接、时间始终保留。
+    enrich(conn, items) 给调用方在同一读取快照提交（回滚释放）前
+    补充关联信息（如凭据换发前后关联）的机会。
     """
     conn.execute("BEGIN")
     try:
@@ -219,6 +221,8 @@ def list_placements(conn):
         for row in rows:
             review = _review_credential(conn, row["credential_id"])
             items.append(_list_item(_placement_dict(row), review))
+        if enrich is not None:
+            enrich(conn, items)
         conn.rollback()  # 只读事务：释放快照，不落任何记录
     except Exception:
         conn.rollback()
@@ -226,10 +230,11 @@ def list_placements(conn):
     return items
 
 
-def placement_review(conn, placement_id):
+def placement_review(conn, placement_id, enrich=None):
     """查阅单条投放记录：一致读取快照中的投放状态与凭据当前风险。
 
     返回投放详情（含封存结论与当前阻断区间）；记录不存在时返回 None。
+    enrich(conn, [detail]) 在同一读取快照内补充关联信息。
     """
     conn.execute("BEGIN")
     try:
@@ -239,6 +244,8 @@ def placement_review(conn, placement_id):
             return None
         review = _review_credential(conn, row["credential_id"])
         detail = _detail(_placement_dict(row), review)
+        if enrich is not None:
+            enrich(conn, [detail])
         conn.rollback()  # 只读事务：释放快照
     except Exception:
         conn.rollback()
